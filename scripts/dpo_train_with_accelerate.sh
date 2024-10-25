@@ -14,10 +14,9 @@ accelerate launch \
     --use_deepspeed \
     --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
     open_instruct/dpo_tune.py \
-    --model_name_or_path allenai/tulu-2-7b \
+    --model_name_or_path /gpfs/users/lchu/open-instruct/output/mamba2_9b_lr2e5_2epochs \
     --use_flash_attn \
-    --gradient_checkpointing \
-    --tokenizer_name allenai/tulu-2-7b \
+    --tokenizer_name /gpfs/users/lchu/open-instruct/output/mamba2_9b_lr2e5_2epochs \
     --use_slow_tokenizer \
     --dataset_name HuggingFaceH4/ultrafeedback_binarized \
     --max_seq_length 2048 \
@@ -29,7 +28,10 @@ accelerate launch \
     --warmup_ratio 0.1 \
     --weight_decay 0. \
     --num_train_epochs 3 \
-    --output_dir ~/dpo_7b_recreate2 \
-    --with_tracking \
+    --output_dir output/dpo_mamba \
     --report_to tensorboard \
-    --logging_steps 1
+    --logging_steps 1 \
+    --try_launch_beaker_eval_jobs False \
+    --push_to_hub False \
+    # --max_train_samples 100 \
+    # --gradient_checkpointing \

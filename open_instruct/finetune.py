@@ -67,6 +67,8 @@ from open_instruct.utils import (
     upload_metadata_to_hf,
 )
 
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+
 logger = get_logger(__name__)
 
 
@@ -617,15 +619,8 @@ def main(args: FlatArguments):
                 attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
             )
         else:
-            model = AutoModelForCausalLM.from_pretrained(
+            model = MambaLMHeadModel.from_pretrained(
                 args.model_name_or_path,
-                revision=args.model_revision,
-                from_tf=bool(".ckpt" in args.model_name_or_path),
-                config=config,
-                trust_remote_code=args.trust_remote_code,
-                low_cpu_mem_usage=args.low_cpu_mem_usage,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2" if args.use_flash_attn else "eager",
             )
     else:
         logger.info("Training new model from scratch")
@@ -664,23 +659,8 @@ def main(args: FlatArguments):
     elif isinstance(tokenizer, GPT2Tokenizer) and isinstance(model, OPTForCausalLM):
         num_added_tokens = tokenizer.add_special_tokens({"unk_token": "<unk>"})
     elif isinstance(tokenizer, transformers.PreTrainedTokenizerFast) and tokenizer.pad_token is None:
-        num_added_tokens = tokenizer.add_special_tokens({"pad_token": "<pad>"})
-        assert num_added_tokens == 1, "We detected no padding token but add_special_tokens did not add one."
-
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    # gather deepspeed to get "real" embedding size
-    embeddings = model.get_input_embeddings()
-    with deepspeed.zero.GatheredParameters(embeddings.weight, modifier_rank=None):
-        embedding_size = embeddings.weight.shape[0]
-    # resize does its own gather
-    if len(tokenizer) > embedding_size:
-        # pad to multiple for tensor cores.
-        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
-    # update embedding size after resizing for sum loss
-    embeddings = model.get_input_embeddings()
-    with deepspeed.zero.GatheredParameters(embeddings.weight, modifier_rank=None):
-        embedding_size = embeddings.weight.shape[0]
+        tokenizer.add_special_tokens({"pad_token": "<|reserved_special_token_250|>"})
+        model.config.pad_token_id = tokenizer.pad_token_id
 
     # set the tokenizer chat template to the training format
     # this will be used for encoding the training examples
@@ -905,12 +885,19 @@ def main(args: FlatArguments):
             local_total_tokens += batch["attention_mask"].sum()
             total_token_including_padding += batch["attention_mask"].numel()
             with accelerator.accumulate(model):
+                batch.pop("attention_mask")
+                labels = batch.pop("labels")
                 if args.load_balancing_loss:
-                    outputs = model(**batch, use_cache=False, output_router_logits=True)
+                    outputs = model(**batch)
                 else:
-                    outputs = model(**batch, use_cache=False)
+                    outputs = model(**batch)
                 if args.reduce_loss == "mean":
-                    loss = outputs.loss
+                    logits = outputs.logits
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    labels = labels.to(logits.device)
+                    shift_labels = labels[..., 1:].contiguous()
+                    loss_fct = torch.nn.CrossEntropyLoss()
+                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1).long())
                 else:
                     # reduce loss is sum
                     # this ensures that we weight all tokens in the dataset equally,
@@ -920,17 +907,11 @@ def main(args: FlatArguments):
                     # see https://github.com/huggingface/transformers/issues/24725 for
                     # more discussion and details.
                     logits = outputs.logits
-                    labels = batch["labels"]
-                    # Shift so that tokens < n predict n
                     shift_logits = logits[..., :-1, :].contiguous()
+                    labels = labels.to(logits.device)
                     shift_labels = labels[..., 1:].contiguous()
-                    # Flatten the tokens
                     loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
-                    shift_logits = shift_logits.view(-1, embedding_size)
-                    shift_labels = shift_labels.view(-1)
-                    # Enable model parallelism
-                    shift_labels = shift_labels.to(shift_logits.device)
-                    loss = loss_fct(shift_logits, shift_labels)
+                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1).long())
                     if args.load_balancing_loss:
                         aux_loss = args.load_balancing_weight * outputs.aux_loss
                         loss += aux_loss

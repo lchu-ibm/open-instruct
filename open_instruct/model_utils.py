@@ -360,13 +360,15 @@ def save_with_accelerate(
             unwrapped_model.save_pretrained(output_dir, state_dict=state_dict)
     else:
         # don't use safetensors for saving for now
-        unwrapped_model.save_pretrained(
-            output_dir,
-            is_main_process=accelerator.is_main_process,
-            save_function=accelerator.save,
-            state_dict=state_dict,
-            safe_serialization=False,
-        )
+        import os
+        import json
+        model_path = os.path.join(output_dir, 'pytorch_model.bin')
+        torch.save(state_dict, model_path)
+        config_path = os.path.join(output_dir, 'config.json')
+        with open(config_path, 'w') as f:
+            config_dict = unwrapped_model.config.__dict__
+            config_dict.pop("pad_token_id", None)
+            json.dump(config_dict, f, indent=4)
 
     if accelerator.is_main_process:
         tokenizer.save_pretrained(output_dir)

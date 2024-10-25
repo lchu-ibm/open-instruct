@@ -78,6 +78,8 @@ from open_instruct.utils import (
     upload_metadata_to_hf,
 )
 
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+
 logger = get_logger(__name__)
 
 
@@ -565,6 +567,8 @@ def main(args: FlatArguments):
             **dataset_args,
         )
 
+    raw_datasets["train"] = raw_datasets["train_prefs"]
+
     # Load pretrained model and tokenizer
     if args.config_name:
         config = AutoConfig.from_pretrained(
@@ -634,15 +638,10 @@ def main(args: FlatArguments):
                     use_flash_attention_2=True if args.use_flash_attn else False,
                 )
             else:
-                model = AutoModelForCausalLM.from_pretrained(
+                model = MambaLMHeadModel.from_pretrained(
                     args.model_name_or_path,
-                    revision=args.model_revision,
-                    from_tf=bool(".ckpt" in args.model_name_or_path),
-                    config=config,
-                    trust_remote_code=args.trust_remote_code,
-                    low_cpu_mem_usage=args.low_cpu_mem_usage,
-                    use_flash_attention_2=True if args.use_flash_attn else False,
                 )
+
         else:
             logger.info("Training new model from scratch")
             model = AutoModelForCausalLM.from_config(config)
@@ -693,21 +692,8 @@ def main(args: FlatArguments):
     elif isinstance(tokenizer, GPT2Tokenizer) and isinstance(model, OPTForCausalLM):
         num_added_tokens = tokenizer.add_special_tokens({"unk_token": "<unk>"})
     elif isinstance(tokenizer, transformers.PreTrainedTokenizerFast) and tokenizer.pad_token is None:
-        num_added_tokens = tokenizer.add_special_tokens({"pad_token": "<pad>"})
-        assert num_added_tokens == 1, "We detected no padding token but add_special_tokens did not add one."
-
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    # gather deepspeed to get "real" embedding size
-    embeddings = model.get_input_embeddings()
-    with deepspeed.zero.GatheredParameters(embeddings.weight, modifier_rank=None):
-        if len(tokenizer) > embeddings.weight.shape[0]:
-            model.resize_token_embeddings(len(tokenizer))
-    if reference_model is not None:
-        reference_embeddings = reference_model.get_input_embeddings()
-        with deepspeed.zero.GatheredParameters(reference_embeddings.weight, modifier_rank=None):
-            if len(tokenizer) > reference_embeddings.weight.shape[0]:
-                reference_model.resize_token_embeddings(len(tokenizer))
+        tokenizer.add_special_tokens({"pad_token": "<|reserved_special_token_250|>"})
+        model.config.pad_token_id = tokenizer.pad_token_id
 
     # set the tokenizer chat template to the training format
     # this will be used for encoding the training examples
